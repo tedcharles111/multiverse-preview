@@ -1,0 +1,4 @@
+*.preview.domain.com {
+    tls your-email@example.com
+    reverse_proxy localhost:{{hostPort}}  # dynamic part will be configured via API
+}
