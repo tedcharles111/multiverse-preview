@@ -32,10 +32,14 @@ export class ContainerManager {
       console.log(`[${sessionId}] No package.json, skipping npm install`);
     }
 
-    const containerPort = this.detectDevPort(files);
+    // Find a free random port (between 3001 and 3999)
+    const hostPort = await this.findFreePort(3001, 3999);
+    const env = { ...process.env, PORT: hostPort.toString() };
+
+    // Determine the default framework port (for logging only)
+    const defaultPort = this.detectDevPort(files);
     const cmd = startCommand || this.detectStartCommand(files);
 
-    const env = { ...process.env, PORT: containerPort.toString() };
     const serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
 
     let stderrLog = '';
@@ -49,9 +53,9 @@ export class ContainerManager {
       console.log(`[${sessionId}] stdout: ${data.toString()}`);
     });
 
-    let hostPort: number;
+    // Wait for the assigned port to be listening, or process to exit
     try {
-      hostPort = await this.waitForPort(containerPort, serverProcess, 10000);
+      await this.waitForPort(hostPort, serverProcess, 10000);
     } catch (err) {
       if (serverProcess.exitCode !== null) {
         throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog}`);
@@ -63,7 +67,7 @@ export class ContainerManager {
       id: sessionId,
       containerId: sessionId,
       hostPort,
-      containerPort,
+      containerPort: defaultPort, // store the detected port for reference
       subdomain: sessionId,
       createdAt: new Date(),
       lastAccessed: new Date(),
@@ -74,6 +78,31 @@ export class ContainerManager {
     (session as any).process = serverProcess;
 
     return session;
+  }
+
+  private async findFreePort(start: number, end: number): Promise<number> {
+    for (let port = start; port <= end; port++) {
+      try {
+        await new Promise((resolve, reject) => {
+          const socket = net.connect(port, 'localhost');
+          socket.on('connect', () => {
+            socket.destroy();
+            reject(new Error('Port in use'));
+          });
+          socket.on('error', (err) => {
+            if ((err as any).code === 'ECONNREFUSED') {
+              resolve(true); // port is free
+            } else {
+              reject(err);
+            }
+          });
+        });
+        return port; // found free port
+      } catch {
+        // try next port
+      }
+    }
+    throw new Error('No free port found');
   }
 
   private async runCommand(command: string, cwd: string): Promise<void> {
@@ -103,7 +132,7 @@ export class ContainerManager {
     return 'npm run dev';
   }
 
-  private async waitForPort(port: number, process: any, timeout = 10000): Promise<number> {
+  private async waitForPort(port: number, process: any, timeout = 10000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       if (process.exitCode !== null) {
@@ -115,7 +144,7 @@ export class ContainerManager {
           socket.on('connect', () => { socket.destroy(); resolve(true); });
           socket.on('error', reject);
         });
-        return port;
+        return; // port is listening
       } catch {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
