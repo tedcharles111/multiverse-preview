@@ -7,7 +7,8 @@ import { sessionStore } from './sessionStore';
 import { PreviewSession } from './types/previewSession';
 
 const BASE_DIR = '/tmp/previews';
-const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.pxxl.click';
+// 🔥 HARDCODED DOMAIN – bypass environment variable
+const PUBLIC_URL = 'https://multiverse-preview.pxxl.click';
 
 export class ContainerManager {
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
@@ -20,7 +21,6 @@ export class ContainerManager {
       await fs.writeFile(fullPath, content);
     }
 
-    // Only run npm install if package.json exists
     const hasPackageJson = files['package.json'] !== undefined;
     if (hasPackageJson) {
       try {
@@ -32,12 +32,8 @@ export class ContainerManager {
       console.log(`[${sessionId}] No package.json, skipping npm install`);
     }
 
-    // Find a free random port (between 3001 and 3999)
     const hostPort = await this.findFreePort(3001, 3999);
     const env = { ...process.env, PORT: hostPort.toString() };
-
-    // Determine the default framework port (for logging only)
-    const defaultPort = this.detectDevPort(files);
     const cmd = startCommand || this.detectStartCommand(files);
 
     const serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
@@ -53,7 +49,6 @@ export class ContainerManager {
       console.log(`[${sessionId}] stdout: ${data.toString()}`);
     });
 
-    // Wait for the assigned port to be listening, or process to exit
     try {
       await this.waitForPort(hostPort, serverProcess, 10000);
     } catch (err) {
@@ -67,7 +62,7 @@ export class ContainerManager {
       id: sessionId,
       containerId: sessionId,
       hostPort,
-      containerPort: defaultPort, // store the detected port for reference
+      containerPort: this.detectDevPort(files),
       subdomain: sessionId,
       createdAt: new Date(),
       lastAccessed: new Date(),
@@ -91,16 +86,14 @@ export class ContainerManager {
           });
           socket.on('error', (err) => {
             if ((err as any).code === 'ECONNREFUSED') {
-              resolve(true); // port is free
+              resolve(true);
             } else {
               reject(err);
             }
           });
         });
-        return port; // found free port
-      } catch {
-        // try next port
-      }
+        return port;
+      } catch {}
     }
     throw new Error('No free port found');
   }
@@ -144,7 +137,7 @@ export class ContainerManager {
           socket.on('connect', () => { socket.destroy(); resolve(true); });
           socket.on('error', reject);
         });
-        return; // port is listening
+        return;
       } catch {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
