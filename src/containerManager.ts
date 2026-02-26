@@ -7,6 +7,7 @@ import { sessionStore } from './sessionStore';
 import { PreviewSession } from './types/previewSession';
 
 const BASE_DIR = '/tmp/previews';
+const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.pxxl.click';
 
 export class ContainerManager {
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
@@ -19,7 +20,18 @@ export class ContainerManager {
       await fs.writeFile(fullPath, content);
     }
 
-    await this.runCommand('npm install', workDir);
+    // Only run npm install if package.json exists
+    const hasPackageJson = files['package.json'] !== undefined;
+    if (hasPackageJson) {
+      try {
+        await this.runCommand('npm install', workDir);
+      } catch (err) {
+        console.error(`[${sessionId}] npm install failed:`, err);
+        // Continue anyway, maybe it's not needed
+      }
+    } else {
+      console.log(`[${sessionId}] No package.json, skipping npm install`);
+    }
 
     const containerPort = this.detectDevPort(files);
     const cmd = startCommand || this.detectStartCommand(files);
@@ -27,10 +39,29 @@ export class ContainerManager {
     const env = { ...process.env, PORT: containerPort.toString() };
     const serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
 
-    serverProcess.stdout.on('data', (data) => console.log(`[${sessionId}] stdout: ${data}`));
-    serverProcess.stderr.on('data', (data) => console.error(`[${sessionId}] stderr: ${data}`));
+    // Capture stderr immediately
+    let stderrLog = '';
+    serverProcess.stderr.on('data', (data) => {
+      const msg = data.toString();
+      stderrLog += msg;
+      console.error(`[${sessionId}] stderr: ${msg}`);
+    });
 
-    const hostPort = await this.waitForPort(containerPort);
+    serverProcess.stdout.on('data', (data) => {
+      console.log(`[${sessionId}] stdout: ${data.toString()}`);
+    });
+
+    // Wait for the server to start or process to exit
+    let hostPort: number;
+    try {
+      hostPort = await this.waitForPort(containerPort, serverProcess, 10000);
+    } catch (err) {
+      // If the process exited, throw the captured stderr
+      if (serverProcess.exitCode !== null) {
+        throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog}`);
+      }
+      throw err;
+    }
 
     const session: PreviewSession = {
       id: sessionId,
@@ -41,6 +72,7 @@ export class ContainerManager {
       createdAt: new Date(),
       lastAccessed: new Date(),
       status: 'running',
+      previewUrl: `${PUBLIC_URL}/preview/${sessionId}`,
     };
     sessionStore.set(sessionId, session);
     (session as any).process = serverProcess;
@@ -50,9 +82,12 @@ export class ContainerManager {
 
   private async runCommand(command: string, cwd: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      exec(command, { cwd }, (error) => {
-        if (error) reject(error);
-        else resolve();
+      exec(command, { cwd }, (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
       });
     });
   }
@@ -71,12 +106,18 @@ export class ContainerManager {
         if (pkg.scripts?.start) return 'npm start';
       } catch {}
     }
+    // Default to node server.js if it exists
+    if (files['server.js']) return 'node server.js';
     return 'npm run dev';
   }
 
-  private async waitForPort(port: number, timeout = 10000): Promise<number> {
+  private async waitForPort(port: number, process: any, timeout = 10000): Promise<number> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
+      // If process exited, throw
+      if (process.exitCode !== null) {
+        throw new Error(`Process exited with code ${process.exitCode}`);
+      }
       try {
         await new Promise((resolve, reject) => {
           const socket = net.connect(port, 'localhost');
