@@ -7,7 +7,7 @@ import { sessionStore } from './sessionStore';
 import { PreviewSession } from './types/previewSession';
 
 const BASE_DIR = '/tmp/previews';
-// 🔥 HARDCODED DOMAIN – bypass environment variable
+// 🔥 HARDCODED DOMAIN – replace with your actual domain
 const PUBLIC_URL = 'https://multiverse-preview.pxxl.click';
 
 export class ContainerManager {
