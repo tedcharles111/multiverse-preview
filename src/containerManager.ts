@@ -27,7 +27,6 @@ export class ContainerManager {
         await this.runCommand('npm install', workDir);
       } catch (err) {
         console.error(`[${sessionId}] npm install failed:`, err);
-        // Continue anyway, maybe it's not needed
       }
     } else {
       console.log(`[${sessionId}] No package.json, skipping npm install`);
@@ -39,7 +38,6 @@ export class ContainerManager {
     const env = { ...process.env, PORT: containerPort.toString() };
     const serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
 
-    // Capture stderr immediately
     let stderrLog = '';
     serverProcess.stderr.on('data', (data) => {
       const msg = data.toString();
@@ -51,12 +49,10 @@ export class ContainerManager {
       console.log(`[${sessionId}] stdout: ${data.toString()}`);
     });
 
-    // Wait for the server to start or process to exit
     let hostPort: number;
     try {
       hostPort = await this.waitForPort(containerPort, serverProcess, 10000);
     } catch (err) {
-      // If the process exited, throw the captured stderr
       if (serverProcess.exitCode !== null) {
         throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog}`);
       }
@@ -82,12 +78,9 @@ export class ContainerManager {
 
   private async runCommand(command: string, cwd: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      exec(command, { cwd }, (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve();
-        }
+      exec(command, { cwd }, (error) => {
+        if (error) reject(error);
+        else resolve();
       });
     });
   }
@@ -106,7 +99,6 @@ export class ContainerManager {
         if (pkg.scripts?.start) return 'npm start';
       } catch {}
     }
-    // Default to node server.js if it exists
     if (files['server.js']) return 'node server.js';
     return 'npm run dev';
   }
@@ -114,7 +106,6 @@ export class ContainerManager {
   private async waitForPort(port: number, process: any, timeout = 10000): Promise<number> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
-      // If process exited, throw
       if (process.exitCode !== null) {
         throw new Error(`Process exited with code ${process.exitCode}`);
       }
