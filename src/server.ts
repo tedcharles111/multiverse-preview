@@ -12,7 +12,7 @@ app.use(express.json({ limit: '50mb' }));
 
 app.use('/preview', previewRoutes);
 
-app.use('/preview/:sessionId', async (req, res, next) => {
+app.use('/preview/:sessionId', (req, res, next) => {
   const sessionId = req.params.sessionId;
   const session = sessionStore.get(sessionId);
 
@@ -20,23 +20,22 @@ app.use('/preview/:sessionId', async (req, res, next) => {
     return res.status(404).send('Preview session not found');
   }
 
+  // Use type assertion to bypass TypeScript error
   const proxy = createProxyMiddleware({
-    target: `http://localhost:${session.hostPort}`,
+    target: `http://127.0.0.1:${session.hostPort}`,
     changeOrigin: true,
     pathRewrite: {
       [`^/preview/${sessionId}`]: '',
     },
     ws: true,
-  });
-
-  // Attach error handler manually
-  (proxy as any).on('error', (err: Error, req: IncomingMessage, res: ServerResponse) => {
-    console.error(`Proxy error for session ${sessionId}:`, err);
-    if (!res.headersSent) {
-      res.statusCode = 502;
-      res.end('Preview server error');
-    }
-  });
+    onError: (err: Error, req: IncomingMessage, res: ServerResponse) => {
+      console.error(`Proxy error for session ${sessionId}:`, err);
+      if (!res.headersSent) {
+        res.statusCode = 502;
+        res.end('Preview server error');
+      }
+    },
+  } as any);
 
   return proxy(req, res, next);
 });
