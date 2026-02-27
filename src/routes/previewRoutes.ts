@@ -15,26 +15,37 @@ router.post('/create', async (req, res) => {
     const sessionId = uuidv4().slice(0, 8);
     const session = await cm.createContainer(sessionId, files, startCommand);
 
-    // ✅ Return the public previewUrl from the session
     res.json({ 
       sessionId, 
       previewUrl: session.previewUrl 
     });
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    console.error('Preview creation error:', e);
+    // Send clean error message to the client
+    res.status(500).json({ error: e.message || 'Unknown error' });
   }
 });
 
 router.post('/stop/:id', async (req, res) => {
-  await cm.stopContainer(req.params.id);
-  res.json({ success: true });
+  try {
+    await cm.stopContainer(req.params.id);
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-router.get('/logs/:id', (req, res) => streamLogs(req.params.id, res));
+router.get('/logs/:id', (req, res) => {
+  streamLogs(req.params.id, res).catch(e => {
+    console.error('Log error:', e);
+    res.status(500).end();
+  });
+});
 
 router.get('/status/:id', (req, res) => {
   const s = sessionStore.get(req.params.id);
-  res.json(s || { error: 'not found' });
+  if (!s) return res.status(404).json({ error: 'not found' });
+  res.json(s);
 });
 
 export default router;
