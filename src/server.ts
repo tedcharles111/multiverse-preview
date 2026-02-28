@@ -7,21 +7,25 @@ import { sessionStore } from './sessionStore';
 
 const app = express();
 
-// ✅ Strict CORS for your builder domain (change if needed)
-app.use(cors({
-  origin: ['https://themultiverse.build', 'http://localhost:3000'], // add your dev domains
+// CORS configuration
+const corsOptions = {
+  origin: ['https://themultiverse.build', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   credentials: true,
   optionsSuccessStatus: 200
-}));
+};
+
+// Apply CORS middleware to all routes
+app.use(cors(corsOptions));
+
+// Explicitly handle preflight requests for all routes
+app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '50mb' }));
 
-// Mount preview routes
 app.use('/preview', previewRoutes);
 
-// Proxy route for serving preview content
 app.use('/preview/:sessionId', (req, res, next) => {
   const sessionId = req.params.sessionId;
   const session = sessionStore.get(sessionId);
@@ -30,7 +34,6 @@ app.use('/preview/:sessionId', (req, res, next) => {
     return res.status(404).send('Preview session not found');
   }
 
-  // Use 127.0.0.1 for more reliable local connections
   const proxy = createProxyMiddleware({
     target: `http://127.0.0.1:${session.hostPort}`,
     changeOrigin: true,
@@ -43,12 +46,12 @@ app.use('/preview/:sessionId', (req, res, next) => {
         res.end('Preview server error: ' + err.message);
       }
     },
-  } as any); // type assertion to bypass TS quirk
+  } as any);
 
   return proxy(req, res, next);
 });
 
-// Global error handler (last middleware)
+// Global error handler
 app.use((err: any, req: any, res: any, next: any) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error: ' + err.message });
