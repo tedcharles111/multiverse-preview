@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: multiverse-preview
+    runtime: node
+    repo: https://github.com/tedcharles111/multiverse-preview
+    plan: free
+    branch: main
+    buildCommand: npm ci && npm install --include=dev && npm run build
+    startCommand: npm start
+    envVars:
+      - key: PUBLIC_URL
+        value: https://multiverse-preview.onrender.com

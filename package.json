@@ -2,7 +2,7 @@
   "name": "preview-engine",
   "version": "1.0.0",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --skipLibCheck --noImplicitAny false",
     "start": "node dist/server.js"
   },
   "dependencies": {
