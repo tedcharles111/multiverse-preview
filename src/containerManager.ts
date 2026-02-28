@@ -7,7 +7,7 @@ import { sessionStore } from './sessionStore';
 import { PreviewSession } from './types/previewSession';
 
 const BASE_DIR = '/tmp/previews';
-const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.pxxl.click';
+const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.fly.dev';
 
 export class ContainerManager {
   private static activePreviews = 0;
