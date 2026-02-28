@@ -7,12 +7,12 @@ import { sessionStore } from './sessionStore';
 import { PreviewSession } from './types/previewSession';
 
 const BASE_DIR = '/tmp/previews';
-const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.fly.dev';
+const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.onrender.com';
 
 export class ContainerManager {
   private static activePreviews = 0;
-  private static MAX_CONCURRENT = 10; // Reduced to prevent EMFILE
-  private static IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes (was 15)
+  private static MAX_CONCURRENT = 50;          // Increased to handle more users
+  private static IDLE_TIMEOUT = 2 * 60 * 1000; // 2 minutes (frees slots faster)
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
     // Enforce concurrency limit
@@ -29,6 +29,17 @@ export class ContainerManager {
         const fullPath = path.join(workDir, filePath);
         await fs.mkdir(path.dirname(fullPath), { recursive: true });
         await fs.writeFile(fullPath, content);
+      }
+
+      // Attempt to fix common package.json errors (trailing commas, etc.) – very basic
+      if (files['package.json']) {
+        try {
+          // Try to parse and then re-stringify to fix formatting
+          const pkg = JSON.parse(files['package.json']);
+          await fs.writeFile(path.join(workDir, 'package.json'), JSON.stringify(pkg, null, 2));
+        } catch (e) {
+          console.warn(`[${sessionId}] package.json is malformed, but continuing:`, e);
+        }
       }
 
       // Only run npm install if package.json exists
@@ -48,29 +59,41 @@ export class ContainerManager {
       const env = { ...process.env, PORT: hostPort.toString() };
 
       // Detect framework and build appropriate start command
-      const cmd = this.buildStartCommand(files, startCommand, hostPort);
+      let cmd = startCommand || this.buildStartCommand(files, hostPort);
+      let serverProcess: any;
 
-      const serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
+      // Try to start the server, with one retry for missing Vite
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
 
-      let stderrLog = '';
-      serverProcess.stderr.on('data', (data) => {
-        const msg = data.toString();
-        stderrLog += msg;
-        console.error(`[${sessionId}] stderr: ${msg}`);
-      });
+        let stderrLog = '';
+        serverProcess.stderr.on('data', (data) => {
+          const msg = data.toString();
+          stderrLog += msg;
+          console.error(`[${sessionId}] stderr: ${msg}`);
+        });
 
-      serverProcess.stdout.on('data', (data) => {
-        console.log(`[${sessionId}] stdout: ${data.toString()}`);
-      });
+        serverProcess.stdout.on('data', (data) => {
+          console.log(`[${sessionId}] stdout: ${data.toString()}`);
+        });
 
-      // Wait for the assigned port to be listening, or process to exit
-      try {
-        await this.waitForPort(hostPort, serverProcess, 15000);
-      } catch (err) {
-        if (serverProcess.exitCode !== null) {
-          throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog || '(no stderr)'}`);
+        try {
+          await this.waitForPort(hostPort, serverProcess, 15000);
+          break; // success
+        } catch (err) {
+          // If process exited with code 127 (command not found) and the error mentions "vite"
+          if (serverProcess.exitCode === 127 && stderrLog.includes('vite: not found')) {
+            console.log(`[${sessionId}] Vite missing, installing and retrying...`);
+            // Install vite as dev dependency
+            await this.runCommand('npm install -D vite', workDir);
+            // Retry with the same command (which may now work)
+            continue;
+          }
+          // If we're on second attempt or other error, throw
+          if (attempt === 2 || serverProcess.exitCode !== 127) {
+            throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog || '(no stderr)'}`);
+          }
         }
-        throw new Error(`Server did not start on port ${hostPort} within timeout. Stderr: ${stderrLog || '(none)'}`);
       }
 
       const session: PreviewSession = {
@@ -98,14 +121,13 @@ export class ContainerManager {
     }
   }
 
-  private buildStartCommand(files: Record<string, string>, userCommand: string | undefined, assignedPort: number): string {
+  private buildStartCommand(files: Record<string, string>, assignedPort: number): string {
     // If user explicitly provided a command, use it (but we can't force port)
-    if (userCommand) return userCommand;
+    // (We'll handle detection in the caller)
 
     // Detect Vite
     const isVite = files['vite.config.js'] || files['vite.config.ts'];
     if (isVite) {
-      // For Vite, we need to force the port via command line arguments
       return `vite --port ${assignedPort} --host`;
     }
 

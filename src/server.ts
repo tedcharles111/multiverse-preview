@@ -10,7 +10,7 @@ const app = express();
 // Allowed origins
 const allowedOrigins = ['https://themultiverse.build', 'http://localhost:3000'];
 
-// Manual CORS middleware – sets headers for every response
+// Manual CORS middleware – runs before everything, sets headers even on errors
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
@@ -20,7 +20,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 
-  // Handle preflight requests immediately
+  // Handle preflight immediately
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -65,7 +65,7 @@ app.use('/preview/:sessionId', (req, res, next) => {
   return proxy(req, res, next);
 });
 
-// Global error handler
+// Global error handler – CORS headers already set by manual middleware
 app.use((err: any, req: any, res: any, next: any) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error: ' + err.message });
