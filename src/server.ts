@@ -7,20 +7,34 @@ import { sessionStore } from './sessionStore';
 
 const app = express();
 
-// CORS configuration
-const corsOptions = {
-  origin: ['https://themultiverse.build', 'http://localhost:3000'],
+// Allowed origins
+const allowedOrigins = ['https://themultiverse.build', 'http://localhost:3000'];
+
+// Manual CORS middleware – sets headers for every response
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  // Handle preflight requests immediately
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Also use the cors package as a backup (optional)
+app.use(cors({
+  origin: allowedOrigins,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   credentials: true,
   optionsSuccessStatus: 200
-};
-
-// Apply CORS middleware to all routes
-app.use(cors(corsOptions));
-
-// Explicitly handle preflight requests for all routes
-app.options('*', cors(corsOptions));
+}));
 
 app.use(express.json({ limit: '50mb' }));
 
