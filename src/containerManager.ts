@@ -23,8 +23,8 @@ export class ContainerManager {
   private static MAX_CONCURRENT = 50;
   private static timeouts: Map<string, NodeJS.Timeout> = new Map();
   private static processes: Map<string, ManagedProcess> = new Map();
-  private static readonly MAX_RESTARTS = 3;
-  private static readonly RESTART_BACKOFF = 5000; // 5 seconds base
+  private static readonly MAX_RESTARTS = 5; // Increased to allow time for installation
+  private static readonly RESTART_BACKOFF = 3000; // 3 seconds base
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
     if (ContainerManager.activePreviews >= ContainerManager.MAX_CONCURRENT) {
@@ -69,7 +69,7 @@ export class ContainerManager {
       let cmd = startCommand || this.buildStartCommand(files, hostPort);
 
       // Start the process with monitoring
-      const managed = await this.startMonitoredProcess(sessionId, cmd, workDir, env, hostPort);
+      const managed = await this.startMonitoredProcess(sessionId, cmd, workDir, env, hostPort, files);
 
       const session: PreviewSession = {
         id: sessionId,
@@ -98,7 +98,8 @@ export class ContainerManager {
     command: string,
     cwd: string,
     env: NodeJS.ProcessEnv,
-    port: number
+    port: number,
+    files: Record<string, string>
   ): Promise<ManagedProcess> {
     const managed: ManagedProcess = {
       process: null!,
@@ -108,9 +109,17 @@ export class ContainerManager {
       stderr: ''
     };
 
-    const start = () => {
+    const start = async () => {
       const proc = spawn('sh', ['-c', command], { cwd, env, stdio: 'pipe' });
       managed.process = proc;
+
+      let stderrBuffer = '';
+      proc.stderr.on('data', (data) => {
+        const chunk = data.toString();
+        stderrBuffer += chunk;
+        managed.stderr += chunk;
+        console.error(`[${sessionId}] stderr: ${chunk}`);
+      });
 
       proc.stdout.on('data', (data) => {
         const chunk = data.toString();
@@ -118,14 +127,25 @@ export class ContainerManager {
         console.log(`[${sessionId}] stdout: ${chunk}`);
       });
 
-      proc.stderr.on('data', (data) => {
-        const chunk = data.toString();
-        managed.stderr += chunk;
-        console.error(`[${sessionId}] stderr: ${chunk}`);
-      });
-
-      proc.on('exit', (code, signal) => {
+      proc.on('exit', async (code, signal) => {
         console.log(`[${sessionId}] process exited with code ${code} signal ${signal}`);
+
+        // Check for missing Vite error
+        const isViteMissing = stderrBuffer.includes('Cannot find package') && stderrBuffer.includes('vite');
+        const isViteNotFound = stderrBuffer.includes('vite: not found');
+
+        if ((isViteMissing || isViteNotFound) && managed.restartCount < ContainerManager.MAX_RESTARTS) {
+          console.log(`[${sessionId}] Vite missing, attempting to install...`);
+          try {
+            // Install vite as dev dependency
+            await this.runCommand('npm install -D vite', cwd);
+            console.log(`[${sessionId}] Vite installed, restarting...`);
+          } catch (installErr) {
+            console.error(`[${sessionId}] Failed to install Vite:`, installErr);
+          }
+          // Continue to restart after backoff
+        }
+
         // Attempt restart if within limits and not stopped manually
         if (managed.restartCount < ContainerManager.MAX_RESTARTS) {
           const backoff = ContainerManager.RESTART_BACKOFF * Math.pow(2, managed.restartCount);
@@ -135,7 +155,6 @@ export class ContainerManager {
           setTimeout(() => start(), backoff);
         } else {
           console.error(`[${sessionId}] max restarts reached, giving up`);
-          // Update session status to error
           const session = sessionStore.get(sessionId);
           if (session) session.status = 'error';
         }
@@ -177,7 +196,6 @@ export class ContainerManager {
   private buildStartCommand(files: Record<string, string>, assignedPort: number): string {
     const isVite = files['vite.config.js'] || files['vite.config.ts'];
     if (isVite) {
-      // Use npx to get better error messages if vite is missing
       return `npx vite --port ${assignedPort} --host`;
     }
 
@@ -221,7 +239,7 @@ export class ContainerManager {
 
   private async runCommand(command: string, cwd: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      exec(command, { cwd }, (error) => {
+      exec(command, { cwd }, (error, stdout, stderr) => {
         if (error) reject(error);
         else resolve();
       });
