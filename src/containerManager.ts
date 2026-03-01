@@ -23,8 +23,8 @@ export class ContainerManager {
   private static MAX_CONCURRENT = 50;
   private static timeouts: Map<string, NodeJS.Timeout> = new Map();
   private static processes: Map<string, ManagedProcess> = new Map();
-  private static readonly MAX_RESTARTS = 5; // Increased to allow time for installation
-  private static readonly RESTART_BACKOFF = 3000; // 3 seconds base
+  private static readonly MAX_RESTARTS = 5;
+  private static readonly RESTART_BACKOFF = 3000;
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
     if (ContainerManager.activePreviews >= ContainerManager.MAX_CONCURRENT) {
@@ -33,6 +33,15 @@ export class ContainerManager {
     ContainerManager.activePreviews++;
 
     const workDir = path.join(BASE_DIR, sessionId);
+    const managed: ManagedProcess = {
+      process: null!,
+      restartCount: 0,
+      lastRestart: Date.now(),
+      stdout: '',
+      stderr: ''
+    };
+    ContainerManager.processes.set(sessionId, managed);
+
     try {
       await fs.mkdir(workDir, { recursive: true });
 
@@ -54,13 +63,12 @@ export class ContainerManager {
 
       const hasPackageJson = files['package.json'] !== undefined;
       if (hasPackageJson) {
-        try {
-          await this.runCommand('npm install', workDir);
-        } catch (err) {
-          console.error(`[${sessionId}] npm install failed:`, err);
-        }
+        // Capture npm install output
+        const installOutput = await this.runCommandWithOutput('npm install', workDir);
+        managed.stdout += installOutput.stdout;
+        managed.stderr += installOutput.stderr;
       } else {
-        console.log(`[${sessionId}] No package.json, skipping npm install`);
+        managed.stdout += '[INFO] No package.json, skipping npm install\n';
       }
 
       const hostPort = await this.findFreePort(3001, 3999);
@@ -68,8 +76,8 @@ export class ContainerManager {
 
       let cmd = startCommand || this.buildStartCommand(files, hostPort);
 
-      // Start the process with monitoring
-      const managed = await this.startMonitoredProcess(sessionId, cmd, workDir, env, hostPort, files);
+      // Start the monitored process
+      await this.startMonitoredProcess(sessionId, cmd, workDir, env, hostPort, files, managed);
 
       const session: PreviewSession = {
         id: sessionId,
@@ -83,7 +91,6 @@ export class ContainerManager {
         previewUrl: `${PUBLIC_URL}/preview/${sessionId}`,
       };
       sessionStore.set(sessionId, session);
-      ContainerManager.processes.set(sessionId, managed);
 
       this.setIdleTimeout(sessionId);
 
@@ -93,22 +100,24 @@ export class ContainerManager {
     }
   }
 
+  private async runCommandWithOutput(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      exec(command, { cwd }, (error, stdout, stderr) => {
+        resolve({ stdout, stderr });
+        // We ignore error because we want to continue even if npm install fails
+      });
+    });
+  }
+
   private async startMonitoredProcess(
     sessionId: string,
     command: string,
     cwd: string,
     env: NodeJS.ProcessEnv,
     port: number,
-    files: Record<string, string>
-  ): Promise<ManagedProcess> {
-    const managed: ManagedProcess = {
-      process: null!,
-      restartCount: 0,
-      lastRestart: Date.now(),
-      stdout: '',
-      stderr: ''
-    };
-
+    files: Record<string, string>,
+    managed: ManagedProcess
+  ) {
     const start = async () => {
       const proc = spawn('sh', ['-c', command], { cwd, env, stdio: 'pipe' });
       managed.process = proc;
@@ -130,23 +139,21 @@ export class ContainerManager {
       proc.on('exit', async (code, signal) => {
         console.log(`[${sessionId}] process exited with code ${code} signal ${signal}`);
 
-        // Check for missing Vite error
         const isViteMissing = stderrBuffer.includes('Cannot find package') && stderrBuffer.includes('vite');
         const isViteNotFound = stderrBuffer.includes('vite: not found');
 
         if ((isViteMissing || isViteNotFound) && managed.restartCount < ContainerManager.MAX_RESTARTS) {
           console.log(`[${sessionId}] Vite missing, attempting to install...`);
           try {
-            // Install vite as dev dependency
-            await this.runCommand('npm install -D vite', cwd);
+            const installOutput = await this.runCommandWithOutput('npm install -D vite', cwd);
+            managed.stdout += installOutput.stdout;
+            managed.stderr += installOutput.stderr;
             console.log(`[${sessionId}] Vite installed, restarting...`);
           } catch (installErr) {
             console.error(`[${sessionId}] Failed to install Vite:`, installErr);
           }
-          // Continue to restart after backoff
         }
 
-        // Attempt restart if within limits and not stopped manually
         if (managed.restartCount < ContainerManager.MAX_RESTARTS) {
           const backoff = ContainerManager.RESTART_BACKOFF * Math.pow(2, managed.restartCount);
           managed.restartCount++;
@@ -160,14 +167,11 @@ export class ContainerManager {
         }
       });
 
-      // Wait for port to be listening (or process to fail)
       this.waitForPort(port, proc, 15000).catch(() => {});
     };
 
     start();
-    // Wait a bit for the first start
     await new Promise(resolve => setTimeout(resolve, 2000));
-    return managed;
   }
 
   async refreshSession(sessionId: string) {
@@ -198,10 +202,8 @@ export class ContainerManager {
     if (isVite) {
       return `npx vite --port ${assignedPort} --host`;
     }
-
     const isNext = files['next.config.js'] || files['next.config.ts'];
     if (isNext) return 'npm run dev';
-
     if (files['package.json']) {
       try {
         const pkg = JSON.parse(files['package.json']);
@@ -209,7 +211,6 @@ export class ContainerManager {
         if (pkg.scripts?.start) return 'npm start';
       } catch {}
     }
-
     if (files['server.js']) return 'node server.js';
     return 'npm run dev';
   }
@@ -239,7 +240,7 @@ export class ContainerManager {
 
   private async runCommand(command: string, cwd: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      exec(command, { cwd }, (error, stdout, stderr) => {
+      exec(command, { cwd }, (error) => {
         if (error) reject(error);
         else resolve();
       });

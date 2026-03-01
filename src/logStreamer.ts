@@ -1,5 +1,8 @@
 import { Response } from 'express';
 import { sessionStore } from './sessionStore';
+import { ContainerManager } from './containerManager';
+
+const containerManager = new ContainerManager();
 
 export async function streamLogs(sessionId: string, res: Response) {
   const session = sessionStore.get(sessionId);
@@ -8,31 +11,43 @@ export async function streamLogs(sessionId: string, res: Response) {
     return;
   }
 
-  // Get the process from the session (stored in containerManager)
-  const proc = (session as any).process;
-  if (!proc || !proc.stdout || !proc.stderr) {
-    res.status(500).send('Process not available for logging');
-    return;
-  }
+  // Get stored logs from the container manager (npm install, etc.)
+  const { stdout, stderr } = await containerManager.getProcessOutput(sessionId);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
-  const sendLog = (type: string, data: Buffer) => {
-    const output = data.toString('utf8');
-    res.write(`data: ${JSON.stringify({ type, log: output })}\n\n`);
+  // Send all historical stdout
+  if (stdout) {
+    res.write(`event: history\ndata: ${JSON.stringify({ type: 'stdout', data: stdout })}\n\n`);
+  }
+  if (stderr) {
+    res.write(`event: history\ndata: ${JSON.stringify({ type: 'stderr', data: stderr })}\n\n`);
+  }
+
+  // Get the current process (if still alive)
+  const managed = (containerManager as any).constructor.processes.get(sessionId);
+  if (!managed || !managed.process) {
+    res.write(`event: end\ndata: Process terminated\n\n`);
+    res.end();
+    return;
+  }
+
+  // Live streaming
+  const stdoutHandler = (data: Buffer) => {
+    res.write(`data: ${JSON.stringify({ type: 'stdout', data: data.toString() })}\n\n`);
+  };
+  const stderrHandler = (data: Buffer) => {
+    res.write(`data: ${JSON.stringify({ type: 'stderr', data: data.toString() })}\n\n`);
   };
 
-  const onStdout = (data: Buffer) => sendLog('stdout', data);
-  const onStderr = (data: Buffer) => sendLog('stderr', data);
-
-  proc.stdout.on('data', onStdout);
-  proc.stderr.on('data', onStderr);
+  managed.process.stdout.on('data', stdoutHandler);
+  managed.process.stderr.on('data', stderrHandler);
 
   res.on('close', () => {
-    proc.stdout.off('data', onStdout);
-    proc.stderr.off('data', onStderr);
+    managed.process.stdout.off('data', stdoutHandler);
+    managed.process.stderr.off('data', stderrHandler);
     res.end();
   });
 }
