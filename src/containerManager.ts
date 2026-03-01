@@ -8,11 +8,12 @@ import { PreviewSession } from './types/previewSession';
 
 const BASE_DIR = '/tmp/previews';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.onrender.com';
+const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 
 export class ContainerManager {
   private static activePreviews = 0;
   private static MAX_CONCURRENT = 50;
-  private static IDLE_TIMEOUT = 2 * 60 * 1000;
+  private static timeouts: Map<string, NodeJS.Timeout> = new Map();
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
     if (ContainerManager.activePreviews >= ContainerManager.MAX_CONCURRENT) {
@@ -30,7 +31,6 @@ export class ContainerManager {
         await fs.writeFile(fullPath, content);
       }
 
-      // Basic package.json repair
       if (files['package.json']) {
         try {
           const pkg = JSON.parse(files['package.json']);
@@ -100,13 +100,28 @@ export class ContainerManager {
       sessionStore.set(sessionId, session);
       (session as any).process = serverProcess;
 
-      setTimeout(() => {
-        this.stopContainer(sessionId).catch(console.error);
-      }, ContainerManager.IDLE_TIMEOUT);
+      this.setIdleTimeout(sessionId);
 
       return session;
     } finally {
       ContainerManager.activePreviews--;
+    }
+  }
+
+  private setIdleTimeout(sessionId: string) {
+    const existing = ContainerManager.timeouts.get(sessionId);
+    if (existing) clearTimeout(existing);
+    const timeout = setTimeout(() => {
+      this.stopContainer(sessionId).catch(console.error);
+    }, IDLE_TIMEOUT);
+    ContainerManager.timeouts.set(sessionId, timeout);
+  }
+
+  async refreshSession(sessionId: string) {
+    const session = sessionStore.get(sessionId);
+    if (session) {
+      session.lastAccessed = new Date();
+      this.setIdleTimeout(sessionId);
     }
   }
 
@@ -195,5 +210,8 @@ export class ContainerManager {
     }
     await fs.rm(path.join(BASE_DIR, sessionId), { recursive: true, force: true });
     sessionStore.delete(sessionId);
+    const timeout = ContainerManager.timeouts.get(sessionId);
+    if (timeout) clearTimeout(timeout);
+    ContainerManager.timeouts.delete(sessionId);
   }
 }
