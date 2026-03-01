@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { exec, spawn } from 'child_process';
+import { exec, spawn, ChildProcess } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import net from 'net';
@@ -10,10 +10,21 @@ const BASE_DIR = '/tmp/previews';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.onrender.com';
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 
+interface ManagedProcess {
+  process: ChildProcess;
+  restartCount: number;
+  lastRestart: number;
+  stdout: string;
+  stderr: string;
+}
+
 export class ContainerManager {
   private static activePreviews = 0;
   private static MAX_CONCURRENT = 50;
   private static timeouts: Map<string, NodeJS.Timeout> = new Map();
+  private static processes: Map<string, ManagedProcess> = new Map();
+  private static readonly MAX_RESTARTS = 3;
+  private static readonly RESTART_BACKOFF = 5000; // 5 seconds base
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
     if (ContainerManager.activePreviews >= ContainerManager.MAX_CONCURRENT) {
@@ -31,6 +42,7 @@ export class ContainerManager {
         await fs.writeFile(fullPath, content);
       }
 
+      // Basic package.json repair
       if (files['package.json']) {
         try {
           const pkg = JSON.parse(files['package.json']);
@@ -55,36 +67,9 @@ export class ContainerManager {
       const env = { ...process.env, PORT: hostPort.toString() };
 
       let cmd = startCommand || this.buildStartCommand(files, hostPort);
-      let serverProcess: any;
 
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
-
-        let stderrLog = '';
-        serverProcess.stderr.on('data', (data) => {
-          const msg = data.toString();
-          stderrLog += msg;
-          console.error(`[${sessionId}] stderr: ${msg}`);
-        });
-
-        serverProcess.stdout.on('data', (data) => {
-          console.log(`[${sessionId}] stdout: ${data.toString()}`);
-        });
-
-        try {
-          await this.waitForPort(hostPort, serverProcess, 15000);
-          break;
-        } catch (err) {
-          if (serverProcess.exitCode === 127 && stderrLog.includes('vite: not found')) {
-            console.log(`[${sessionId}] Vite missing, installing and retrying...`);
-            await this.runCommand('npm install -D vite', workDir);
-            continue;
-          }
-          if (attempt === 2 || serverProcess.exitCode !== 127) {
-            throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog || '(no stderr)'}`);
-          }
-        }
-      }
+      // Start the process with monitoring
+      const managed = await this.startMonitoredProcess(sessionId, cmd, workDir, env, hostPort);
 
       const session: PreviewSession = {
         id: sessionId,
@@ -98,13 +83,79 @@ export class ContainerManager {
         previewUrl: `${PUBLIC_URL}/preview/${sessionId}`,
       };
       sessionStore.set(sessionId, session);
-      (session as any).process = serverProcess;
+      ContainerManager.processes.set(sessionId, managed);
 
       this.setIdleTimeout(sessionId);
 
       return session;
     } finally {
       ContainerManager.activePreviews--;
+    }
+  }
+
+  private async startMonitoredProcess(
+    sessionId: string,
+    command: string,
+    cwd: string,
+    env: NodeJS.ProcessEnv,
+    port: number
+  ): Promise<ManagedProcess> {
+    const managed: ManagedProcess = {
+      process: null!,
+      restartCount: 0,
+      lastRestart: Date.now(),
+      stdout: '',
+      stderr: ''
+    };
+
+    const start = () => {
+      const proc = spawn('sh', ['-c', command], { cwd, env, stdio: 'pipe' });
+      managed.process = proc;
+
+      proc.stdout.on('data', (data) => {
+        const chunk = data.toString();
+        managed.stdout += chunk;
+        console.log(`[${sessionId}] stdout: ${chunk}`);
+      });
+
+      proc.stderr.on('data', (data) => {
+        const chunk = data.toString();
+        managed.stderr += chunk;
+        console.error(`[${sessionId}] stderr: ${chunk}`);
+      });
+
+      proc.on('exit', (code, signal) => {
+        console.log(`[${sessionId}] process exited with code ${code} signal ${signal}`);
+        // Attempt restart if within limits and not stopped manually
+        if (managed.restartCount < ContainerManager.MAX_RESTARTS) {
+          const backoff = ContainerManager.RESTART_BACKOFF * Math.pow(2, managed.restartCount);
+          managed.restartCount++;
+          managed.lastRestart = Date.now();
+          console.log(`[${sessionId}] restarting in ${backoff}ms (attempt ${managed.restartCount})`);
+          setTimeout(() => start(), backoff);
+        } else {
+          console.error(`[${sessionId}] max restarts reached, giving up`);
+          // Update session status to error
+          const session = sessionStore.get(sessionId);
+          if (session) session.status = 'error';
+        }
+      });
+
+      // Wait for port to be listening (or process to fail)
+      this.waitForPort(port, proc, 15000).catch(() => {});
+    };
+
+    start();
+    // Wait a bit for the first start
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    return managed;
+  }
+
+  async refreshSession(sessionId: string) {
+    const session = sessionStore.get(sessionId);
+    if (session) {
+      session.lastAccessed = new Date();
+      this.setIdleTimeout(sessionId);
     }
   }
 
@@ -117,12 +168,10 @@ export class ContainerManager {
     ContainerManager.timeouts.set(sessionId, timeout);
   }
 
-  async refreshSession(sessionId: string) {
-    const session = sessionStore.get(sessionId);
-    if (session) {
-      session.lastAccessed = new Date();
-      this.setIdleTimeout(sessionId);
-    }
+  async getProcessOutput(sessionId: string): Promise<{ stdout: string; stderr: string }> {
+    const managed = ContainerManager.processes.get(sessionId);
+    if (!managed) return { stdout: '', stderr: '' };
+    return { stdout: managed.stdout, stderr: managed.stderr };
   }
 
   private buildStartCommand(files: Record<string, string>, assignedPort: number): string {
@@ -182,7 +231,7 @@ export class ContainerManager {
     return 3000;
   }
 
-  private async waitForPort(port: number, process: any, timeout = 15000): Promise<void> {
+  private async waitForPort(port: number, process: ChildProcess, timeout = 15000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       if (process.exitCode !== null) {
@@ -204,12 +253,13 @@ export class ContainerManager {
   async stopContainer(sessionId: string) {
     const session = sessionStore.get(sessionId);
     if (!session) return;
-    const proc = (session as any).process;
-    if (proc && typeof proc.kill === 'function') {
-      proc.kill('SIGTERM');
+    const managed = ContainerManager.processes.get(sessionId);
+    if (managed && managed.process) {
+      managed.process.kill('SIGTERM');
     }
     await fs.rm(path.join(BASE_DIR, sessionId), { recursive: true, force: true });
     sessionStore.delete(sessionId);
+    ContainerManager.processes.delete(sessionId);
     const timeout = ContainerManager.timeouts.get(sessionId);
     if (timeout) clearTimeout(timeout);
     ContainerManager.timeouts.delete(sessionId);

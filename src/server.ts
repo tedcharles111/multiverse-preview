@@ -50,10 +50,34 @@ app.use('/preview/:sessionId', async (req, res, next) => {
 
   await containerManager.refreshSession(sessionId);
 
-  const proc = (session as any).process;
-  if (proc && proc.exitCode !== null) {
-    console.error(`Session ${sessionId} process already exited with code ${proc.exitCode}`);
-    return res.status(502).send('Preview server is no longer running');
+  // Check if process is still alive
+  const managed = (containerManager as any).constructor.processes.get(sessionId);
+  const proc = managed?.process;
+  if (!proc || proc.exitCode !== null) {
+    // Process is dead – show error overlay with captured stderr
+    const { stderr } = await containerManager.getProcessOutput(sessionId);
+    const errorHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+          .error-container { max-width: 800px; width: 100%; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+          h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
+          pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
+          .info { color: #888; font-size: 14px; margin-top: 16px; }
+        </style>
+      </head>
+      <body>
+        <div class="error-container">
+          <h1>⚡ Preview Server Crashed</h1>
+          <pre>${stderr.replace(/</g, '&lt;').replace(/>/g, '&gt;') || 'No error output captured.'}</pre>
+          <div class="info">The preview server exited unexpectedly. This is likely due to an error in your code or missing dependencies.</div>
+        </div>
+      </body>
+      </html>
+    `;
+    return res.status(500).send(errorHtml);
   }
 
   const proxy = createProxyMiddleware({
@@ -61,11 +85,33 @@ app.use('/preview/:sessionId', async (req, res, next) => {
     changeOrigin: true,
     pathRewrite: { [`^/preview/${sessionId}`]: '' },
     ws: true,
-    onError: (err: Error, req: IncomingMessage, res: ServerResponse) => {
+    onError: async (err: Error, req: IncomingMessage, res: ServerResponse) => {
       console.error(`Proxy error for session ${sessionId}:`, err.message);
       if (!res.headersSent) {
+        const { stderr } = await containerManager.getProcessOutput(sessionId);
+        const errorHtml = `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <style>
+              body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+              .error-container { max-width: 800px; width: 100%; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+              h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
+              pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
+              .info { color: #888; font-size: 14px; margin-top: 16px; }
+            </style>
+          </head>
+          <body>
+            <div class="error-container">
+              <h1>⚡ Preview Server Error</h1>
+              <pre>${stderr.replace(/</g, '&lt;').replace(/>/g, '&gt;') || err.message}</pre>
+              <div class="info">The preview server could not be reached. This may be a temporary issue or an error in your code.</div>
+            </div>
+          </body>
+          </html>
+        `;
         res.statusCode = 502;
-        res.end(`Preview server error: ${err.message}. The preview may have crashed or not started properly.`);
+        res.end(errorHtml);
       }
     },
     proxyTimeout: 30000,
