@@ -27,7 +27,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Also use the cors package as a backup (optional)
+// Also use the cors package as a backup
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -38,8 +38,12 @@ app.use(cors({
 
 app.use(express.json({ limit: '50mb' }));
 
+// Serve a simple favicon to avoid 404s
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 app.use('/preview', previewRoutes);
 
+// Proxy route for serving preview content
 app.use('/preview/:sessionId', (req, res, next) => {
   const sessionId = req.params.sessionId;
   const session = sessionStore.get(sessionId);
@@ -48,18 +52,28 @@ app.use('/preview/:sessionId', (req, res, next) => {
     return res.status(404).send('Preview session not found');
   }
 
+  // Check if the child process is still alive (optional, but helps debugging)
+  const proc = (session as any).process;
+  if (proc && proc.exitCode !== null) {
+    console.error(`Session ${sessionId} process already exited with code ${proc.exitCode}`);
+    return res.status(502).send('Preview server is no longer running');
+  }
+
   const proxy = createProxyMiddleware({
     target: `http://127.0.0.1:${session.hostPort}`,
     changeOrigin: true,
     pathRewrite: { [`^/preview/${sessionId}`]: '' },
     ws: true,
     onError: (err: Error, req: IncomingMessage, res: ServerResponse) => {
-      console.error(`Proxy error for session ${sessionId}:`, err);
+      console.error(`Proxy error for session ${sessionId}:`, err.message);
       if (!res.headersSent) {
         res.statusCode = 502;
-        res.end('Preview server error: ' + err.message);
+        res.end(`Preview server error: ${err.message}. The preview may have crashed or not started properly.`);
       }
     },
+    // Increase timeout for slow servers
+    proxyTimeout: 30000,
+    timeout: 30000,
   } as any);
 
   return proxy(req, res, next);

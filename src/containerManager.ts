@@ -11,11 +11,10 @@ const PUBLIC_URL = process.env.PUBLIC_URL || 'https://multiverse-preview.onrende
 
 export class ContainerManager {
   private static activePreviews = 0;
-  private static MAX_CONCURRENT = 50;          // Increased to handle more users
-  private static IDLE_TIMEOUT = 2 * 60 * 1000; // 2 minutes (frees slots faster)
+  private static MAX_CONCURRENT = 50;
+  private static IDLE_TIMEOUT = 2 * 60 * 1000;
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
-    // Enforce concurrency limit
     if (ContainerManager.activePreviews >= ContainerManager.MAX_CONCURRENT) {
       throw new Error(`Server busy (${ContainerManager.MAX_CONCURRENT} concurrent previews). Please try again later.`);
     }
@@ -31,10 +30,9 @@ export class ContainerManager {
         await fs.writeFile(fullPath, content);
       }
 
-      // Attempt to fix common package.json errors (trailing commas, etc.) – very basic
+      // Basic package.json repair
       if (files['package.json']) {
         try {
-          // Try to parse and then re-stringify to fix formatting
           const pkg = JSON.parse(files['package.json']);
           await fs.writeFile(path.join(workDir, 'package.json'), JSON.stringify(pkg, null, 2));
         } catch (e) {
@@ -42,7 +40,6 @@ export class ContainerManager {
         }
       }
 
-      // Only run npm install if package.json exists
       const hasPackageJson = files['package.json'] !== undefined;
       if (hasPackageJson) {
         try {
@@ -54,15 +51,12 @@ export class ContainerManager {
         console.log(`[${sessionId}] No package.json, skipping npm install`);
       }
 
-      // Find a free port (3001-3999)
       const hostPort = await this.findFreePort(3001, 3999);
       const env = { ...process.env, PORT: hostPort.toString() };
 
-      // Detect framework and build appropriate start command
       let cmd = startCommand || this.buildStartCommand(files, hostPort);
       let serverProcess: any;
 
-      // Try to start the server, with one retry for missing Vite
       for (let attempt = 1; attempt <= 2; attempt++) {
         serverProcess = spawn('sh', ['-c', cmd], { cwd: workDir, env, stdio: 'pipe' });
 
@@ -79,17 +73,13 @@ export class ContainerManager {
 
         try {
           await this.waitForPort(hostPort, serverProcess, 15000);
-          break; // success
+          break;
         } catch (err) {
-          // If process exited with code 127 (command not found) and the error mentions "vite"
           if (serverProcess.exitCode === 127 && stderrLog.includes('vite: not found')) {
             console.log(`[${sessionId}] Vite missing, installing and retrying...`);
-            // Install vite as dev dependency
             await this.runCommand('npm install -D vite', workDir);
-            // Retry with the same command (which may now work)
             continue;
           }
-          // If we're on second attempt or other error, throw
           if (attempt === 2 || serverProcess.exitCode !== 127) {
             throw new Error(`Process exited with code ${serverProcess.exitCode}. Stderr: ${stderrLog || '(no stderr)'}`);
           }
@@ -110,7 +100,6 @@ export class ContainerManager {
       sessionStore.set(sessionId, session);
       (session as any).process = serverProcess;
 
-      // Set a timer to auto-destroy after idle timeout
       setTimeout(() => {
         this.stopContainer(sessionId).catch(console.error);
       }, ContainerManager.IDLE_TIMEOUT);
@@ -122,22 +111,12 @@ export class ContainerManager {
   }
 
   private buildStartCommand(files: Record<string, string>, assignedPort: number): string {
-    // If user explicitly provided a command, use it (but we can't force port)
-    // (We'll handle detection in the caller)
-
-    // Detect Vite
     const isVite = files['vite.config.js'] || files['vite.config.ts'];
-    if (isVite) {
-      return `vite --port ${assignedPort} --host`;
-    }
+    if (isVite) return `vite --port ${assignedPort} --host`;
 
-    // Detect Next.js (it respects PORT env)
     const isNext = files['next.config.js'] || files['next.config.ts'];
-    if (isNext) {
-      return 'npm run dev'; // Next.js uses PORT env automatically
-    }
+    if (isNext) return 'npm run dev';
 
-    // Check package.json scripts
     if (files['package.json']) {
       try {
         const pkg = JSON.parse(files['package.json']);
@@ -146,7 +125,6 @@ export class ContainerManager {
       } catch {}
     }
 
-    // Fallback
     if (files['server.js']) return 'node server.js';
     return 'npm run dev';
   }
@@ -169,9 +147,7 @@ export class ContainerManager {
           });
         });
         return port;
-      } catch {
-        // try next port
-      }
+      } catch {}
     }
     throw new Error('No free port found');
   }
