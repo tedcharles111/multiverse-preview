@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { IncomingMessage, ServerResponse } from 'http';
+import net from 'net';
 import previewRoutes from './routes/previewRoutes';
 import { sessionStore } from './sessionStore';
 import { ContainerManager } from './containerManager';
@@ -40,6 +41,18 @@ app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 app.use('/preview', previewRoutes);
 
+// Helper to check if a port is listening
+async function isPortListening(port: number, timeout = 2000): Promise<boolean> {
+  const socket = new net.Socket();
+  return new Promise((resolve) => {
+    socket.setTimeout(timeout);
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('timeout', () => { socket.destroy(); resolve(false); });
+    socket.once('error', () => { socket.destroy(); resolve(false); });
+    socket.connect(port, '127.0.0.1');
+  });
+}
+
 app.use('/preview/:sessionId', async (req, res, next) => {
   const sessionId = req.params.sessionId;
   const session = sessionStore.get(sessionId);
@@ -50,24 +63,19 @@ app.use('/preview/:sessionId', async (req, res, next) => {
 
   await containerManager.refreshSession(sessionId);
 
-  // Check if process is still alive
-  const managed = (containerManager as any).constructor.processes.get(sessionId);
-  const proc = managed?.process;
-  if (!proc || proc.exitCode !== null) {
-    // Process is dead – show error overlay with captured stderr
+  // If session status is error, show crash page
+  if (session.status === 'error') {
     const { stderr } = await containerManager.getProcessOutput(sessionId);
     const errorHtml = `
       <!DOCTYPE html>
       <html>
-      <head>
-        <style>
-          body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
-          .error-container { max-width: 800px; width: 100%; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
-          h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
-          pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
-          .info { color: #888; font-size: 14px; margin-top: 16px; }
-        </style>
-      </head>
+      <head><style>
+        body { font-family: system-ui; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .error-container { max-width: 800px; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+        h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
+        pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
+        .info { color: #888; font-size: 14px; margin-top: 16px; }
+      </style></head>
       <body>
         <div class="error-container">
           <h1>⚡ Preview Server Crashed</h1>
@@ -78,6 +86,32 @@ app.use('/preview/:sessionId', async (req, res, next) => {
       </html>
     `;
     return res.status(500).send(errorHtml);
+  }
+
+  // Check if the port is actually listening
+  const isAlive = await isPortListening(session.hostPort);
+  if (!isAlive) {
+    const { stderr } = await containerManager.getProcessOutput(sessionId);
+    const errorHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head><style>
+        body { font-family: system-ui; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .error-container { max-width: 800px; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+        h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
+        pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
+        .info { color: #888; font-size: 14px; margin-top: 16px; }
+      </style></head>
+      <body>
+        <div class="error-container">
+          <h1>⚡ Preview Server Not Responding</h1>
+          <pre>${stderr.replace(/</g, '&lt;').replace(/>/g, '&gt;') || 'The server did not start properly.'}</pre>
+          <div class="info">The preview server is not responding. This could be a temporary issue or an error in your code.</div>
+        </div>
+      </body>
+      </html>
+    `;
+    return res.status(502).send(errorHtml);
   }
 
   const proxy = createProxyMiddleware({
@@ -92,15 +126,13 @@ app.use('/preview/:sessionId', async (req, res, next) => {
         const errorHtml = `
           <!DOCTYPE html>
           <html>
-          <head>
-            <style>
-              body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
-              .error-container { max-width: 800px; width: 100%; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
-              h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
-              pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
-              .info { color: #888; font-size: 14px; margin-top: 16px; }
-            </style>
-          </head>
+          <head><style>
+            body { font-family: system-ui; background: #0a0a0a; color: #f0f0f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; }
+            .error-container { max-width: 800px; background: #1e1e1e; border-radius: 12px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+            h1 { color: #ff5f5f; font-size: 24px; margin-top: 0; }
+            pre { background: #2d2d2d; padding: 16px; border-radius: 8px; overflow-x: auto; color: #e6e6e6; font-size: 14px; border-left: 4px solid #ff5f5f; }
+            .info { color: #888; font-size: 14px; margin-top: 16px; }
+          </style></head>
           <body>
             <div class="error-container">
               <h1>⚡ Preview Server Error</h1>

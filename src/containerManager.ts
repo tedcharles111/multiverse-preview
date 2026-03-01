@@ -51,7 +51,6 @@ export class ContainerManager {
         await fs.writeFile(fullPath, content);
       }
 
-      // Basic package.json repair
       if (files['package.json']) {
         try {
           const pkg = JSON.parse(files['package.json']);
@@ -63,7 +62,6 @@ export class ContainerManager {
 
       const hasPackageJson = files['package.json'] !== undefined;
       if (hasPackageJson) {
-        // Capture npm install output
         const installOutput = await this.runCommandWithOutput('npm install', workDir);
         managed.stdout += installOutput.stdout;
         managed.stderr += installOutput.stderr;
@@ -76,7 +74,6 @@ export class ContainerManager {
 
       let cmd = startCommand || this.buildStartCommand(files, hostPort);
 
-      // Start the monitored process
       await this.startMonitoredProcess(sessionId, cmd, workDir, env, hostPort, files, managed);
 
       const session: PreviewSession = {
@@ -101,10 +98,9 @@ export class ContainerManager {
   }
 
   private async runCommandWithOutput(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       exec(command, { cwd }, (error, stdout, stderr) => {
         resolve({ stdout, stderr });
-        // We ignore error because we want to continue even if npm install fails
       });
     });
   }
@@ -162,6 +158,7 @@ export class ContainerManager {
           setTimeout(() => start(), backoff);
         } else {
           console.error(`[${sessionId}] max restarts reached, giving up`);
+          // Mark session as error
           const session = sessionStore.get(sessionId);
           if (session) session.status = 'error';
         }
@@ -236,15 +233,6 @@ export class ContainerManager {
       } catch {}
     }
     throw new Error('No free port found');
-  }
-
-  private async runCommand(command: string, cwd: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      exec(command, { cwd }, (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
   }
 
   private detectDevPort(files: Record<string, string>): number {
