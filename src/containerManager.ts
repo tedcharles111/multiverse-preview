@@ -176,7 +176,10 @@ export class ContainerManager {
 
   private buildStartCommand(files: Record<string, string>, assignedPort: number): string {
     const isVite = files['vite.config.js'] || files['vite.config.ts'];
-    if (isVite) return `vite --port ${assignedPort} --host`;
+    if (isVite) {
+      // Use npx to get better error messages if vite is missing
+      return `npx vite --port ${assignedPort} --host`;
+    }
 
     const isNext = files['next.config.js'] || files['next.config.ts'];
     if (isNext) return 'npm run dev';
