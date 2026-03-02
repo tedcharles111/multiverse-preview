@@ -62,9 +62,13 @@ export class ContainerManager {
 
       const hasPackageJson = files['package.json'] !== undefined;
       if (hasPackageJson) {
-        const installOutput = await this.runCommandWithOutput('npm install', workDir);
-        managed.stdout += installOutput.stdout;
-        managed.stderr += installOutput.stderr;
+        // Run npm install and capture output – if it fails, throw immediately
+        const installResult = await this.runCommandWithOutput('npm install', workDir);
+        managed.stdout += installResult.stdout;
+        managed.stderr += installResult.stderr;
+        if (installResult.error) {
+          throw new Error(`npm install failed:\n${installResult.stderr}`);
+        }
       } else {
         managed.stdout += '[INFO] No package.json, skipping npm install\n';
       }
@@ -97,10 +101,10 @@ export class ContainerManager {
     }
   }
 
-  private async runCommandWithOutput(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
+  private async runCommandWithOutput(command: string, cwd: string): Promise<{ stdout: string; stderr: string; error?: Error }> {
     return new Promise((resolve) => {
       exec(command, { cwd }, (error, stdout, stderr) => {
-        resolve({ stdout, stderr });
+        resolve({ stdout, stderr, error: error || undefined });
       });
     });
   }
@@ -144,7 +148,11 @@ export class ContainerManager {
             const installOutput = await this.runCommandWithOutput('npm install -D vite', cwd);
             managed.stdout += installOutput.stdout;
             managed.stderr += installOutput.stderr;
-            console.log(`[${sessionId}] Vite installed, restarting...`);
+            if (installOutput.error) {
+              console.error(`[${sessionId}] Failed to install Vite:`, installOutput.stderr);
+            } else {
+              console.log(`[${sessionId}] Vite installed, restarting...`);
+            }
           } catch (installErr) {
             console.error(`[${sessionId}] Failed to install Vite:`, installErr);
           }
@@ -158,7 +166,6 @@ export class ContainerManager {
           setTimeout(() => start(), backoff);
         } else {
           console.error(`[${sessionId}] max restarts reached, giving up`);
-          // Mark session as error
           const session = sessionStore.get(sessionId);
           if (session) session.status = 'error';
         }
