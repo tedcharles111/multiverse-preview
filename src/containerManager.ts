@@ -20,10 +20,11 @@ interface ManagedProcess {
 
 export class ContainerManager {
   private static activePreviews = 0;
-  private static MAX_CONCURRENT = 50;
+  // SAFE for Render free tier (512 MB)
+  private static MAX_CONCURRENT = 3;
   private static timeouts: Map<string, NodeJS.Timeout> = new Map();
   private static processes: Map<string, ManagedProcess> = new Map();
-  private static readonly MAX_RESTARTS = 5;
+  private static readonly MAX_RESTARTS = 3;
   private static readonly RESTART_BACKOFF = 3000;
 
   async createContainer(sessionId: string, files: Record<string, string>, startCommand?: string): Promise<PreviewSession> {
@@ -73,7 +74,12 @@ export class ContainerManager {
       }
 
       const hostPort = await this.findFreePort(3001, 3999);
-      const env = { ...process.env, PORT: hostPort.toString() };
+      // Limit child process memory via NODE_OPTIONS
+      const env = { 
+        ...process.env, 
+        PORT: hostPort.toString(),
+        NODE_OPTIONS: '--max-old-space-size=128' // restrict Node to 128 MB per process
+      };
 
       let cmd = startCommand || this.buildStartCommand(files, hostPort);
 
@@ -138,7 +144,6 @@ export class ContainerManager {
       proc.on('exit', async (code, signal) => {
         console.log(`[${sessionId}] process exited with code ${code} signal ${signal}`);
 
-        // Detect missing Vite error
         const isViteMissing = stderrBuffer.includes('Cannot find package') && stderrBuffer.includes('vite');
         const isViteNotFound = stderrBuffer.includes('vite: not found');
 
