@@ -11,14 +11,12 @@ export async function streamLogs(sessionId: string, res: Response) {
     return;
   }
 
-  // Get stored logs from the container manager (npm install, etc.)
   const { stdout, stderr } = await containerManager.getProcessOutput(sessionId);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
-  // Send all historical stdout
   if (stdout) {
     res.write(`event: history\ndata: ${JSON.stringify({ type: 'stdout', data: stdout })}\n\n`);
   }
@@ -26,7 +24,6 @@ export async function streamLogs(sessionId: string, res: Response) {
     res.write(`event: history\ndata: ${JSON.stringify({ type: 'stderr', data: stderr })}\n\n`);
   }
 
-  // Get the current process (if still alive)
   const managed = (containerManager as any).constructor.processes.get(sessionId);
   if (!managed || !managed.process) {
     res.write(`event: end\ndata: Process terminated\n\n`);
@@ -34,7 +31,6 @@ export async function streamLogs(sessionId: string, res: Response) {
     return;
   }
 
-  // Live streaming
   const stdoutHandler = (data: Buffer) => {
     res.write(`data: ${JSON.stringify({ type: 'stdout', data: data.toString() })}\n\n`);
   };

@@ -62,7 +62,6 @@ export class ContainerManager {
 
       const hasPackageJson = files['package.json'] !== undefined;
       if (hasPackageJson) {
-        // Run npm install and capture output – if it fails, throw immediately
         const installResult = await this.runCommandWithOutput('npm install', workDir);
         managed.stdout += installResult.stdout;
         managed.stderr += installResult.stderr;
@@ -139,6 +138,7 @@ export class ContainerManager {
       proc.on('exit', async (code, signal) => {
         console.log(`[${sessionId}] process exited with code ${code} signal ${signal}`);
 
+        // Detect missing Vite error
         const isViteMissing = stderrBuffer.includes('Cannot find package') && stderrBuffer.includes('vite');
         const isViteNotFound = stderrBuffer.includes('vite: not found');
 
